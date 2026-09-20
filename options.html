@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>循环闹钟 — 完整管理</title>
+<style>
+  body { font: 14px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif; color: #343a40; margin: 0; background: #f8f9fa; }
+  .wrap { display: flex; min-height: 100vh; }
+  .sidebar { width: 280px; flex-shrink: 0; background: #fff; border-right: 1px solid #e9ecef; padding: 16px; box-sizing: border-box; }
+  .sidebar h1 { font-size: 16px; margin: 0 0 12px; }
+  .newbtn { width: 100%; padding: 8px 0; background: #f76707; color: #fff; border: none; border-radius: 6px; cursor: pointer; font-size: 13px; margin-bottom: 12px; }
+  .newbtn:hover { opacity: .9; }
+  .gitem { padding: 8px 10px; border-radius: 6px; cursor: pointer; margin-bottom: 4px; border: 1px solid transparent; }
+  .gitem:hover { background: #fff5f0; }
+  .gitem.sel { background: #fff5f0; border-color: #f76707; }
+  .gitem b { display: block; font-size: 13px; }
+  .gitem small { color: #868e96; font-size: 11px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #37b24d; margin-right: 6px; }
+  .dot.off { background: #ced4da; }
+  .main { flex: 1; padding: 24px 32px; overflow-x: auto; }
+  .card { background: #fff; border: 1px solid #e9ecef; border-radius: 10px; padding: 20px; margin-bottom: 16px; max-width: 780px; box-sizing: border-box; }
+  .card h2 { margin: 0 0 4px; font-size: 16px; }
+  .card .hint { color: #868e96; font-size: 12px; margin: 0 0 12px; }
+  label.f { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 13px; }
+  label.f > span { width: 72px; color: #495057; flex-shrink: 0; }
+  label.f input[type=checkbox] { width: 16px; height: 16px; }
+  input[type=text], input[type=time], input[type=datetime-local], textarea, input[type=number] {
+    padding: 6px 8px; border: 1px solid #ced4da; border-radius: 6px; font-size: 13px; font-family: inherit; box-sizing: border-box;
+  }
+  input[type=number] { padding: 4px 6px; }
+  input[type=time] { padding: 4px 6px; }
+  textarea { width: 100%; min-height: 44px; resize: vertical; }
+  input:focus, textarea:focus { outline: none; border-color: #f76707; }
+  .alarm { border: 1px solid #f1f3f5; border-radius: 8px; padding: 12px; margin-bottom: 12px; background: #fdfdfe; }
+  .alarm .head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .alarm .head input[type=text] { flex: 1; font-weight: 600; }
+  .alarm .grid { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 8px 0; font-size: 12px; color: #495057; }
+  .alarm .grid input[type=number] { width: 56px; }
+  .alarm .grid input[type=datetime-local] { padding: 4px 6px; font-size: 12px; }
+  .alarm .nextline { font-size: 12px; color: #f76707; margin-top: 6px; }
+  .del { border: none; background: transparent; color: #fab005; cursor: pointer; font-size: 13px; }
+  .del:hover { color: #e03131; text-decoration: underline; }
+  .addalarm { width: 100%; padding: 8px; border: 1px dashed #fab005; color: #f08c00; background: #fffdf3; border-radius: 8px; cursor: pointer; font-size: 13px; }
+  .addalarm:hover { border-color: #f76707; color: #f76707; }
+  .emptyhint { color: #868e96; padding: 60px 0; text-align: center; }
+  .cardhead { display: flex; align-items: center; justify-content: space-between; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="sidebar">
+    <h1>⏰ 循环闹钟</h1>
+    <button class="newbtn" id="btnNewGroup">＋ 新建分组</button>
+    <div style="display:flex;gap:8px;margin-bottom:12px">
+      <button id="btnExport" style="flex:1;padding:6px 0;border:1px solid #ced4da;background:#fff;border-radius:6px;cursor:pointer;font-size:12px">导出配置</button>
+      <button id="btnImport" style="flex:1;padding:6px 0;border:1px solid #ced4da;background:#fff;border-radius:6px;cursor:pointer;font-size:12px">导入配置</button>
+    </div>
+    <input type="file" id="importFile" accept=".json,application/json" style="display:none">
+    <div id="groupList"></div>
+  </div>
+  <div class="main" id="main"></div>
+</div>
+<script src="shared/logic.js"></script>
+<script src="options.js"></script>
+</body>
+</html>

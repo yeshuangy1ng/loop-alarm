@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+  :root { color-scheme: light; }
+  body { width: 380px; margin: 0; font: 13px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif; color: #343a40; background: #fff; }
+  header { padding: 10px 12px; background: #f76707; color: #fff; }
+  header h1 { margin: 0; font-size: 15px; font-weight: 600; }
+  header p { margin: 2px 0 0; font-size: 11px; opacity: .85; }
+  .list { max-height: 300px; overflow-y: auto; }
+  .group { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #f1f3f5; }
+  .group.off { opacity: .55; }
+  .gname { flex: 1; min-width: 0; cursor: pointer; }
+  .gname b { display: block; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .gname small { color: #868e96; font-size: 11px; }
+  .next { font-size: 11px; color: #f76707; white-space: nowrap; min-width: 52px; text-align: right; }
+  .next.off { color: #adb5bd; }
+  .next.due { font-weight: 700; }
+  button.iconbtn { border: none; background: transparent; cursor: pointer; font-size: 13px; color: #868e96; padding: 2px 5px; border-radius: 4px; }
+  button.iconbtn:hover { background: #f1f3f5; color: #e8590c; }
+  .empty { padding: 24px 12px; text-align: center; color: #868e96; line-height: 1.8; }
+  footer { display: flex; gap: 8px; padding: 8px 12px; border-top: 1px solid #f1f3f5; }
+  footer button { flex: 1; padding: 6px 0; border: 1px solid #f76707; color: #f76707; background: #fff; border-radius: 6px; cursor: pointer; font-size: 12px; }
+  footer button.primary { background: #f76707; color: #fff; }
+  footer button:hover { opacity: .85; }
+</style>
+</head>
+<body>
+<header>
+  <h1>⏰ 循环闹钟</h1>
+  <p id="summary">—</p>
+</header>
+<div class="list" id="list"></div>
+<footer>
+  <button id="btnNew" class="primary">＋ 新建分组</button>
+  <!-- 「测试提醒」已隐藏；如需恢复，移除下面的 hidden 属性即可（后台 testReminder 能力保留） -->
+  <button id="btnTest" hidden>测试提醒</button>
+  <button id="btnOptions">完整管理</button>
+</footer>
+<script src="shared/logic.js"></script>
+<script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>循环闹钟提醒</title>
+<style>
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center; background: linear-gradient(135deg, #fff5f0, #ffe3d3); font: 14px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif; color: #343a40; }
+  .card { width: min(560px, 92vw); background: #fff; border-radius: 16px; box-shadow: 0 12px 40px rgba(232, 89, 12, .18); padding: 28px 32px; box-sizing: border-box; }
+  .head { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .head .icon { font-size: 40px; }
+  .head h1 { margin: 0; font-size: 20px; }
+  .head .time { color: #868e96; font-size: 12px; }
+  .item { border: 1px solid #ffe3d3; background: #fffaf7; border-radius: 10px; padding: 14px 16px; margin-bottom: 12px; }
+  .item .gname { font-size: 11px; color: #f76707; }
+  .item .name { font-weight: 700; font-size: 15px; margin: 2px 0 4px; }
+  .item .text { margin: 4px 0 10px; white-space: pre-wrap; color: #495057; }
+  .snooze { display: flex; gap: 8px; flex-wrap: wrap; }
+  .snooze button { border: 1px solid #f76707; color: #f76707; background: #fff; padding: 4px 12px; border-radius: 999px; cursor: pointer; font-size: 12px; }
+  .snooze button:hover { background: #f76707; color: #fff; }
+  .foot { display: flex; justify-content: flex-end; align-items: center; gap: 12px; margin-top: 8px; }
+  .foot button { background: #f76707; color: #fff; border: none; padding: 8px 24px; border-radius: 8px; cursor: pointer; font-size: 14px; }
+  .foot button:hover { opacity: .9; }
+  .empty { text-align: center; color: #868e96; padding: 24px 0; }
+  .hint { display: none; color: #e03131; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="head">
+    <div class="icon">⏰</div>
+    <div>
+      <h1>循环闹钟提醒</h1>
+      <div class="time" id="time">—</div>
+    </div>
+  </div>
+  <div id="items"></div>
+  <div class="foot">
+    <span class="hint" id="closeHint">自动关闭失败，请手动关闭此标签页</span>
+    <button id="btnClose">关闭</button>
+  </div>
+</div>
+<script src="shared/logic.js"></script>
+<script src="reminder.js"></script>
+</body>
+</html>
