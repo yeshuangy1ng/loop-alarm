@@ -6,7 +6,7 @@ const L = require('../shared/logic.js');
 const assert = require('assert');
 const D = s => Date.parse(s);
 
-/** 复刻 background.js handleTick 的核心判定 */
+/** 复刻 background.js fireDue 的核心判定 */
 function tick(state, now) {
   const fired = [];
   for (const g of state.groups) {
@@ -14,9 +14,10 @@ function tick(state, now) {
     const win = { start: g.start, end: g.end };
     for (const a of g.alarms || []) {
       if (a.enabled === false) continue;
-      if (L.dueTime(a) <= now && L.inWindow(now, win)) {
+      const due = L.dueTime(a);
+      if (due <= now && L.inWindow(now, win)) {
         fired.push(a.id);
-        L.advanceAfterFire(a, g, now);
+        L.advanceAfterFire(a, g, due, now); // 按计划时刻锚定（保持网格）
       }
     }
   }
@@ -75,5 +76,18 @@ assert.strictEqual(a.nextFire, D('2024-01-02T10:00:00'), '补提醒后循环重�
 state.groups[0].enabled = false;
 a.nextFire = D('2024-01-02T09:00:00');
 assert.deepStrictEqual(tick(state, D('2024-01-02T09:00:00')), []);
+
+// 8) 唤醒抖动不固化错位：计划 10:00、实际 10:00:37 才触发 → 锚点仍是网格点 11:00
+//    （旧实现用实际触发时刻锚定，会得到 11:00:37，之后每轮都晚 37 秒）
+state.groups[0].enabled = true;
+a.snoozedUntil = null;
+a.nextFire = D('2024-01-02T10:00:00');
+assert.deepStrictEqual(tick(state, D('2024-01-02T10:00:37')), ['a1']);
+assert.strictEqual(a.nextFire, D('2024-01-02T11:00:00'), '迟到 37 秒触发后锚点仍在计划网格');
+
+// 9) 长时间错过（如浏览器休眠 3 小时）：补提醒一次后跳到下一个网格点
+a.nextFire = D('2024-01-02T11:00:00');
+assert.deepStrictEqual(tick(state, D('2024-01-02T14:00:00')), ['a1']);
+assert.strictEqual(a.nextFire, D('2024-01-02T15:00:00'), '错过多个轮次后只补一次并落到下一个网格点');
 
 console.log('✔ 端到端模拟测试全部通过');

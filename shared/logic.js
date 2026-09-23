@@ -11,7 +11,8 @@
  *   - 生效时间段：start < end 为每日区间；start > end 视为跨午夜；start == end 视为全天。
  *   - 到期时间 due = snoozedUntil（稍后提醒优先），否则为 nextFire。
  *   - 到期但当前不在生效时间段内：跳过本轮，按间隔步进到下一个段内时刻。
- *   - 触发后循环锚点 = 触发时刻 + 间隔，并跳过段外轮次。
+ *   - 触发后循环锚点 = 计划时刻 + k×间隔（k 最小使结果 > 实际触发时刻），并跳过段外轮次。
+ *     用计划时刻而非实际触发时刻锚定，避免唤醒抖动（晚几十秒）被固化进后续每一轮。
  *   - 浏览器关闭期间错过的提醒：恢复后补提醒一次，并重新锚定循环。
  */
 (function (root, factory) {
@@ -86,15 +87,23 @@
     return skipToWindow(t, alarm.intervalMinutes, win);
   }
 
-  /** 在 fireAt 触发后推进循环：锚点 = fireAt + 间隔，并跳过段外轮次；清除稍后提醒。 */
-  function advanceAfterFire(alarm, group, fireAt) {
+  /**
+   * 触发后推进循环（按计划时刻锚定，保持"计划网格"）。
+   * dueAt = 本轮计划时刻（可能因唤醒精度而实际晚触发），now = 实际触发时刻。
+   * 新锚点 = dueAt + k×间隔（k 取最小使结果 > now），再跳过段外轮次；清除稍后提醒。
+   *
+   * 关键：用 dueAt 而不是 now 推进，否则"第一次晚几十秒"会被写进锚点，
+   * 之后每一轮都晚同样多（如每 30 分钟提醒变成 :37/:07），错位被永久固化。
+   * now 省略时退化为"dueAt + 间隔"。
+   */
+  function advanceAfterFire(alarm, group, dueAt, now) {
     alarm.snoozedUntil = null;
+    const step = Math.max(1, Math.round(Number(alarm.intervalMinutes) || 1)) * MS_MIN;
+    const t = (now == null) ? dueAt : now;
+    // 最小 k ≥ 1 使 dueAt + k×step > t（O(1) 计算，避免长循环）
+    const k = Math.min(MAX_SKIP_STEPS, Math.max(1, Math.floor((t - dueAt) / step) + 1));
     const win = { start: group.start, end: group.end };
-    alarm.nextFire = skipToWindow(
-      fireAt + Math.max(1, Math.round(Number(alarm.intervalMinutes) || 1)) * MS_MIN,
-      alarm.intervalMinutes,
-      win
-    );
+    alarm.nextFire = skipToWindow(dueAt + k * step, alarm.intervalMinutes, win);
   }
 
   function formatHHMM(ts) {

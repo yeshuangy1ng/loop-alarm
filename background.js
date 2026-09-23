@@ -1,11 +1,13 @@
 /*
  * 循环闹钟 — 后台 Service Worker
  * 职责：
- *  - 排程到点唤醒：优先 chrome.alarms 一次性闹钟（delayInMinutes，精度 30 秒，
- *    延迟封顶 59.5 分钟、到期自动链式重排；配置变更时串行化重排）；
- *    部分 Chromium 内核浏览器不支持 time/delayInMinutes 属性（报 Unexpected property），
- *    此时自动降级为 periodInMinutes: 1 每分钟轮询（提醒最多延迟约 1 分钟）。
- *  - 到点触发：补提醒（错过补一次）、打开提醒卡片、推进循环、重新排程
+ *  - 排程唤醒：按 when → delayInMinutes → periodInMinutes 顺序探测浏览器支持的方式
+ *      · when / delayInMinutes：一次性闹钟，排程在「目标时刻 − PREWAKE_LEAD」提前唤醒
+ *      · periodInMinutes：降级轮询（0.5 分钟优先，被浏览器钳制则为 1 分钟）
+ *  - 精确等待：唤醒后若距目标时刻已进入 MAX_WAIT 窗口，用 setTimeout 精确等到点再触发
+ *    （等待期间每 10 秒调一次扩展 API 心跳，避免 SW 被 30 秒空闲回收）。
+ *    这样把「平台唤醒抖动」与「弹窗时刻」解耦：先粗略叫醒，再精确触发，弹窗误差降到毫秒级。
+ *  - 到点触发：补提醒（错过补一次）、打开提醒卡片、按计划网格推进循环、重新排程
  *  - 角标倒计时：独立 1 分钟周期闹钟（badge-tick）每分钟刷新，
  *    保证一次性闹钟排程模式下（两次触发之间无 tick）角标也不会停更
  */
@@ -16,9 +18,23 @@ const STATE_KEY = 'state';
 const PENDING_KEY = 'pendingReminders';
 const TICK_ALARM = 'clock-tick';
 const BADGE_ALARM = 'badge-tick';
+// 兜底闹钟：排在目标时刻之后一点点。若 SW 在精确等待期间被回收、或提前唤醒闹钟丢失，
+// 它仍会把 SW 叫醒并按"已到期"补提醒（最坏情况等于退回旧的一次性排程精度，不会漏提醒）
+const BACKUP_ALARM = 'clock-backup';
 
-// 'one-shot' = delayInMinutes 一次性闹钟；'poll' = 每分钟轮询（降级模式）
-let tickMode = 'one-shot';
+// 提前唤醒量：早于目标时刻这么久叫醒 SW（给平台闹钟的抖动留余量）
+const PREWAKE_LEAD_MS = 20000;
+// 精确等待上限：必须明显小于 SW 30 秒空闲回收阈值
+const MAX_WAIT_MS = 27000;
+// 精确等待期间的心跳间隔（调一次扩展 API 即重置 SW 空闲计时）
+const KEEPALIVE_MS = 10000;
+// 一次性闹钟最长延迟（超过则先唤醒再链式重排），防极端远未来值
+const MAX_CHAIN_WAKE_MS = 59.5 * 60000;
+// 轮询周期（分钟）：0.5 = 30 秒，是 Chrome 支持的最小值，更小会被钳制
+const POLL_MINUTES = 0.5;
+
+// 最近一次成功的排程方式：'when' | 'delay' | 'poll' | 'idle'（诊断显示用）
+let schedMode = null;
 
 async function loadState() {
   const obj = await chrome.storage.local.get(STATE_KEY);
@@ -63,81 +79,161 @@ async function updateBadge() {
  *  却仍保留更早一次排程排出的更晚闹钟）。 */
 let schedChain = Promise.resolve();
 
-/** 排程下一次到点唤醒（兼容不支持 time/delayInMinutes 的浏览器） */
+/** 记录排程方式与目标时刻（选项页「运行诊断」显示用） */
+async function recordScheduleInfo(mode, target) {
+  try {
+    await chrome.storage.local.set({ scheduleInfo: { mode, target, at: Date.now() } });
+  } catch (e) { /* 忽略 */ }
+}
+
+/** 累计触发偏差（实际触发时刻 − 计划时刻，正数 = 偏晚），供选项页诊断显示 */
+async function recordFireStat(due, now) {
+  try {
+    const obj = await chrome.storage.local.get('fireStats');
+    const s = obj.fireStats || { n: 0, sum: 0, last: 0, max: 0 };
+    const delta = now - due;
+    s.n += 1;
+    s.sum += delta;
+    s.last = delta;
+    s.max = Math.max(s.max, Math.abs(delta));
+    await chrome.storage.local.set({ fireStats: s });
+  } catch (e) { /* 忽略 */ }
+}
+
+/**
+ * 精确等待到目标时刻：循环校验（防 setTimeout 提前触发 / 系统时钟微调）
+ * 等待期间每 KEEPALIVE_MS 调一次扩展 API 心跳，避免 SW 被 30 秒空闲回收。
+ */
+async function sleepUntil(target) {
+  let hb = null;
+  try {
+    hb = setInterval(() => { chrome.storage.local.get('__keepalive').catch(() => {}); }, KEEPALIVE_MS);
+  } catch (e) { /* 环境不支持 setInterval 时退化为纯等待 */ }
+  try {
+    for (let i = 0; i < 8; i++) {
+      const d = target - Date.now();
+      if (d <= 0) break;
+      await new Promise(r => setTimeout(r, d));
+    }
+  } finally {
+    if (hb != null) clearInterval(hb);
+  }
+  return Date.now();
+}
+
+/** 排程下一次唤醒：早于目标 PREWAKE_LEAD_MS 叫醒 SW（when / delayInMinutes），
+ *  都不支持时降级为周期轮询。每次排程都从最优方式开始探测（自愈：浏览器升级后自动恢复）。 */
 function scheduleTick() {
   const run = async () => {
     const state = await loadState();
     const now = Date.now();
     const t = nextOverall(state, now);
     if (t == null) {
-      try { await chrome.alarms.clear(TICK_ALARM); }
+      try { await chrome.alarms.clear(TICK_ALARM); await chrome.alarms.clear(BACKUP_ALARM); }
       catch (e) { console.warn('[循环闹钟] 清除闹钟失败', e); }
+      await recordScheduleInfo('idle', null);
       return;
     }
-    if (tickMode === 'one-shot') {
+    // 提前唤醒点；封顶 MAX_CHAIN_WAKE_MS 防极端远未来值（到期后链式重排）
+    const wakeAt = Math.min(Math.max(now + 1000, t - PREWAKE_LEAD_MS), now + MAX_CHAIN_WAKE_MS);
+    for (const mode of ['when', 'delay', 'poll']) {
       try {
-        // 一次性闹钟；延迟封顶 59.5 分钟：
-        // 极长 delay（如开始时间设在数天后）可能被部分浏览器拒绝或钳制，
-        // 封顶后到期唤醒时 handleTick 会按最新配置重新排程（链式一次性闹钟），
-        // 期间任何配置变更也会经 storage.onChanged 触发重新排程
-        const delayMin = Math.min(59.5, Math.max(0.5, (t - now) / 60000));
-        await chrome.alarms.create(TICK_ALARM, { delayInMinutes: delayMin });
-        console.info('[循环闹钟] 排程：' + L.formatDateTime(t) + '（' + tickMode + '，延迟封顶 59.5 分钟）');
+        if (mode === 'when') {
+          await chrome.alarms.create(TICK_ALARM, { when: wakeAt });
+        } else if (mode === 'delay') {
+          await chrome.alarms.create(TICK_ALARM, { delayInMinutes: Math.max(0.5, (wakeAt - now) / 60000) });
+        } else {
+          await chrome.alarms.create(TICK_ALARM, { periodInMinutes: POLL_MINUTES });
+        }
+        if (mode === 'poll') {
+          // 轮询本身就是兜底，不需要额外的兜底闹钟
+          try { await chrome.alarms.clear(BACKUP_ALARM); } catch (e) { /* 忽略 */ }
+        } else {
+          try { await chrome.alarms.create(BACKUP_ALARM, { when: Math.max(now + 1000, t + 1000) }); }
+          catch (e) { /* 兜底闹钟可选，失败不影响主排程 */ }
+        }
+        if (schedMode !== mode) {
+          schedMode = mode;
+          console.info('[循环闹钟] 排程方式：' + mode +
+            (mode === 'poll' ? '（降级轮询 ' + (POLL_MINUTES * 60) + ' 秒）'
+                             : '（提前 ' + (PREWAKE_LEAD_MS / 1000) + ' 秒唤醒，目标 ' + L.formatDateTime(t) + '）'));
+        }
+        await recordScheduleInfo(mode, t);
         return;
       } catch (e) {
-        tickMode = 'poll';
-        console.warn('[循环闹钟] 浏览器不支持 delayInMinutes，降级为每分钟轮询', e);
+        if (schedMode !== 'poll') console.warn('[循环闹钟] 排程方式 ' + mode + ' 不可用，尝试降级', e);
       }
     }
-    try {
-      await chrome.alarms.create(TICK_ALARM, { periodInMinutes: 1 });
-      console.info('[循环闹钟] 排程：每分钟轮询，最近提醒 ' + L.formatDateTime(t));
-    } catch (e) {
-      console.error('[循环闹钟] chrome.alarms 不可用，无法排程提醒', e);
-    }
+    console.error('[循环闹钟] chrome.alarms 不可用，无法排程提醒');
   };
   schedChain = schedChain.then(run, run);
   return schedChain;
 }
 
-/** 到点处理：触发所有到期闹钟，打开提醒卡片，推进循环并重新排程 */
-async function handleTick() {
+/** 触发所有到期闹钟（now 在生效时间段内才触发），推进循环并投递提醒卡片。
+ *  锚点按「计划时刻」重算（见 logic.advanceAfterFire），不把唤醒抖动写进后续轮次。 */
+async function fireDue(now) {
   const state = await loadState();
-  const now = Date.now();
   const fired = [];
+  let firstDue = null;
   for (const g of state.groups) {
     if (g.enabled === false) continue;
     const win = { start: g.start, end: g.end };
     for (const a of g.alarms || []) {
       if (a.enabled === false) continue;
+      const due = L.dueTime(a);
       // 触发条件：已到期 且 当前在生效时间段内（段外轮次跳过，等段内再触发）
-      if (L.dueTime(a) <= now && L.inWindow(now, win)) {
+      if (due <= now && L.inWindow(now, win)) {
         fired.push({
           groupId: g.id,
           groupName: g.name || '（未命名）',
           alarmId: a.id,
           alarmName: a.name || '（未命名）',
           text: a.text || '',
-          firedAt: now
+          firedAt: now,
+          dueAt: due
         });
-        L.advanceAfterFire(a, g, now);
+        L.advanceAfterFire(a, g, due, now);
+        if (firstDue == null) firstDue = due;
       }
     }
   }
+  if (!fired.length) return false;
 
-  if (fired.length) {
-    console.info('[循环闹钟] 触发提醒', fired);
-    const batchId = L.uid('b');
-    await saveState(state);
-    const obj = await chrome.storage.local.get(PENDING_KEY);
-    const storeP = obj[PENDING_KEY] || { batches: {} };
-    const batch = { batchId, firedAt: now, items: fired };
-    storeP.batches[batchId] = batch;
-    await chrome.storage.local.set({ [PENDING_KEY]: storeP });
-    await deliverReminder(batch);
-  }
-  if (tickMode === 'one-shot') await scheduleTick(); // 一次性闹钟需重新排程
-  await updateBadge();
+  console.info('[循环闹钟] 触发提醒', fired);
+  const batchId = L.uid('b');
+  await saveState(state);
+  const obj = await chrome.storage.local.get(PENDING_KEY);
+  const storeP = obj[PENDING_KEY] || { batches: {} };
+  const batch = { batchId, firedAt: now, items: fired };
+  storeP.batches[batchId] = batch;
+  await chrome.storage.local.set({ [PENDING_KEY]: storeP });
+  if (firstDue != null) await recordFireStat(firstDue, now);
+  await deliverReminder(batch);
+  return true;
+}
+
+/** 到点处理（串行化，防并发重复触发）：
+ *  1) 触发所有已到期闹钟（补提醒语义不变）
+ *  2) 若下一个目标已进入 MAX_WAIT 窗口 → 精确等到点后回到 1) 触发（毫秒级精度）
+ *  3) 一次性排程模式下按最新配置重新排程 + 刷新角标 */
+let tickChain = Promise.resolve();
+function handleTick() {
+  const run = async () => {
+    for (let guard = 0; guard < 3; guard++) {
+      await fireDue(Date.now());
+      const t = nextOverall(await loadState(), Date.now());
+      if (t == null) break;
+      const d = t - Date.now();
+      if (d <= 0 || d > MAX_WAIT_MS) break;
+      // 目标已在等待窗口内：精确等到点，再回到循环顶部按最新状态触发
+      await sleepUntil(t);
+    }
+    if (schedMode !== 'poll') await scheduleTick(); // 一次性闹钟需重新排程
+    await updateBadge();
+  };
+  tickChain = tickChain.then(run, run);
+  return tickChain;
 }
 
 /** 交付提醒卡片：优先在当前前台标签页右上角显示；无法显示时回退为新标签页 */
@@ -264,8 +360,11 @@ async function ensureBadgeTimer() {
 }
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === TICK_ALARM) handleTick().catch(e => console.error('[循环闹钟] tick 处理失败', e));
-  else if (alarm.name === BADGE_ALARM) updateBadge().catch(e => console.warn('[循环闹钟] 角标刷新失败', e));
+  if (alarm.name === TICK_ALARM || alarm.name === BACKUP_ALARM) {
+    handleTick().catch(e => console.error('[循环闹钟] tick 处理失败', e)); // 未到期时为空操作，天然去重
+  } else if (alarm.name === BADGE_ALARM) {
+    updateBadge().catch(e => console.warn('[循环闹钟] 角标刷新失败', e));
+  }
 });
 
 /** 任意页面（popup/options/reminder）修改状态后：重新排程 + 更新角标 */

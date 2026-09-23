@@ -93,6 +93,21 @@ const a6 = { nextFire: 0, snoozedUntil: null, intervalMinutes: 90 };
 L.advanceAfterFire(a6, gWin, D('2024-01-01T10:00:00'));
 assert.strictEqual(a6.nextFire, D('2024-01-01T11:30:00'));
 
+// 迟到触发（唤醒抖动）：按计划时刻锚定，保持网格，不把抖动写进后续轮次
+const a7 = { nextFire: 0, snoozedUntil: null, intervalMinutes: 30 };
+L.advanceAfterFire(a7, gAll, D('2024-01-01T10:00:00'), D('2024-01-01T10:00:37'));
+assert.strictEqual(a7.nextFire, D('2024-01-01T10:30:00'), '晚 37 秒触发 → 锚点仍是网格点 10:30（而非 10:30:37）');
+
+// 迟到超过一个间隔：跳到下一个严格大于 now 的网格点
+const a8 = { nextFire: 0, snoozedUntil: null, intervalMinutes: 30 };
+L.advanceAfterFire(a8, gAll, D('2024-01-01T10:00:00'), D('2024-01-01T11:05:00'));
+assert.strictEqual(a8.nextFire, D('2024-01-01T11:30:00'), '晚 65 分钟触发 → 锚点为 11:30');
+
+// 恰好在网格点上触发：锚点 + 1 个间隔（不重复触发同一时刻）
+const a9 = { nextFire: 0, snoozedUntil: null, intervalMinutes: 30 };
+L.advanceAfterFire(a9, gAll, D('2024-01-01T10:00:00'), D('2024-01-01T10:30:00'));
+assert.strictEqual(a9.nextFire, D('2024-01-01T11:00:00'), '恰好落在网格点 → 下一个网格点');
+
 // ---------- 格式化 ----------
 assert.strictEqual(L.formatHHMM(D('2024-01-01T09:05:00')), '09:05');
 assert.strictEqual(L.formatCountdown(0), '<1m');
@@ -106,4 +121,4 @@ assert.strictEqual(L.intervalToLabel(90), '1 小时 30 分钟');
 assert.strictEqual(L.intervalToLabel(30), '30 分钟');
 assert.strictEqual(L.intervalToLabel(120), '2 小时');
 
-console.log('✔ 核心调度逻辑测试全部通过（' + 52 + ' 项断言）');
+console.log('✔ 核心调度逻辑测试全部通过（' + 55 + ' 项断言）');

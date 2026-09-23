@@ -55,6 +55,36 @@ function renderSidebar() {
   }
 }
 
+/** 运行诊断：显示实际排程方式（提前唤醒/降级轮询）与最近触发偏差 */
+function fmtDelta(ms) {
+  if (ms == null || !isFinite(ms)) return '—';
+  if (Math.abs(ms) < 1000) return Math.round(ms) + 'ms';
+  return (ms / 1000).toFixed(1) + 's';
+}
+
+const SCHED_MODE_LABEL = {
+  when: '一次性闹钟 when（提前 20 秒唤醒 + 精确等待）',
+  delay: '一次性闹钟 delayInMinutes（提前 20 秒唤醒 + 精确等待）',
+  poll: '降级轮询（浏览器不支持一次性闹钟，30 秒粒度）',
+  idle: '空闲（没有启用的闹钟）'
+};
+
+function renderDiagnostics() {
+  chrome.storage.local.get(['scheduleInfo', 'fireStats']).then(obj => {
+    const el = document.getElementById('diagLine');
+    if (!el) return;
+    const mode = obj.scheduleInfo && obj.scheduleInfo.mode;
+    const s = obj.fireStats;
+    let text = '排程方式：' + (SCHED_MODE_LABEL[mode] || '未知（等待首次排程）');
+    if (s && s.n) {
+      text += '\n触发偏差（实际 − 计划）：最近 ' + fmtDelta(s.last) +
+        '，平均 ' + fmtDelta(s.sum / s.n) + '，最大 ' + fmtDelta(s.max) + '（共 ' + s.n + ' 次）';
+    }
+    el.style.whiteSpace = 'pre-line';
+    el.textContent = text;
+  }).catch(() => { /* 忽略 */ });
+}
+
 function nextLine(a, g) {
   if (g.enabled === false || a.enabled === false) return '已停用';
   const now = Date.now();
@@ -120,6 +150,7 @@ function renderMain() {
     '</div>'
   );
   bindMain(g);
+  renderDiagnostics(); // 配置变更会触发后台重新排程，顺带刷新诊断
 }
 
 function bindMain(g) {
@@ -264,7 +295,7 @@ function refreshFromExternal() {
   }
   load().then(() => {
     if (!selGroup()) selectedId = (state.groups[0] || {}).id || null;
-    renderSidebar(); renderMain();
+    renderSidebar(); renderMain(); renderDiagnostics();
   });
 }
 
@@ -397,4 +428,5 @@ document.getElementById('importFile').addEventListener('change', async (ev) => {
   }
   renderSidebar();
   renderMain();
+  renderDiagnostics();
 })();

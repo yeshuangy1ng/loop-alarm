@@ -40,6 +40,8 @@ const sentRuntimeMessages = [];
 const onMsgAll = [];
 const alarmCreates = [];
 const alerts = [];
+/** 最近一次指定名字的闹钟创建（一个排程会创建主闹钟 + 兜底闹钟，按名字取用） */
+const lastCreate = name => [...alarmCreates].reverse().find(c => c.name === name);
 const chromeStub = {
   storage: {
     local: {
@@ -159,25 +161,34 @@ async function runScript(file) {
   assert.ok(Object.keys(store.pendingReminders.batches).length > 1, 'tick 生成了新的提醒批次');
   assert.ok(Math.abs(a.nextFire - (now + 1800000)) < 60000, '触发后锚点 ≈ now + 30 分钟');
   assert.strictEqual(a.snoozedUntil, null);
-  assert.ok(lastAlarmCreate && Math.abs(lastAlarmCreate.info.delayInMinutes - 30) < 1,
-    'one-shot 模式：重新排程一次性闹钟（≈30 分钟）');
+  const tickCreate = lastCreate('clock-tick');
+  assert.ok(tickCreate && tickCreate.info && tickCreate.info.when != null,
+    'one-shot 模式：排程一次性闹钟（when）');
+  assert.ok(Math.abs(tickCreate.info.when - (a.nextFire - 20000)) < 2000,
+    '唤醒点 = 目标时刻 − 20 秒（预唤醒）');
+  const backupCreate = lastCreate('clock-backup');
+  assert.ok(backupCreate && backupCreate.info.when >= a.nextFire, '同时排程目标时刻之后的兜底闹钟');
+  assert.ok(store.scheduleInfo && store.scheduleInfo.mode === 'when', '排程方式记录为 when（诊断可见）');
 
   // ---- 角标闹钟独立触发：只刷新角标，无未捕获异常 ----
   for (const fn of listeners.alarm) fn({ name: 'badge-tick' });
   await sleep(50);
   assert.strictEqual(rejected.length, 0, 'badge-tick 触发无未捕获异常：' + (rejected[0] || ''));
 
-  // ---- 回归：浏览器拒绝 delayInMinutes（如 Unexpected property 报错）→ 降级为每分钟轮询 ----
+  // ---- 回归：浏览器不支持一次性闹钟（when / delayInMinutes 都报 Unexpected property）
+  //      → 降级为 30 秒周期轮询 ----
   chromeStub.alarms.create = async (name, info) => {
     lastAlarmCreate = { name, info };
-    if (info && 'delayInMinutes' in info) {
-      throw new TypeError("Error at parameter 'alarmInfo': Unexpected property: 'delayInMinutes'");
+    if (info && ('when' in info || 'delayInMinutes' in info)) {
+      const prop = ('when' in info) ? 'when' : 'delayInMinutes';
+      throw new TypeError("Error at parameter 'alarmInfo': Unexpected property: '" + prop + "'");
     }
   };
   listeners.storageChanged.forEach(fn => fn({ state: {} }, 'local'));
   await sleep(100);
-  assert.ok(lastAlarmCreate && lastAlarmCreate.info && lastAlarmCreate.info.periodInMinutes === 1,
-    '降级后创建 1 分钟周期闹钟');
+  assert.ok(lastAlarmCreate && lastAlarmCreate.info && lastAlarmCreate.info.periodInMinutes === 0.5,
+    '降级后创建 30 秒周期轮询闹钟');
+  assert.strictEqual(store.scheduleInfo.mode, 'poll', '排程方式记录为 poll');
 
   // ---- 提醒投递：前台标签页可接收 → 页面内卡片，不新建标签页 ----
   assert.strictEqual(createdTabs.length, 0, '前台标签页可接收时不新建标签页');
@@ -389,5 +400,49 @@ async function runScript(file) {
   const hintEl = registry['closeHint'];
   assert.strictEqual(hintEl.style.display, 'inline', '全部条目处理后显示自动关闭提示');
 
-  console.log('✔ 页面/Service Worker 冒烟测试通过（安装 + tick + popup + options 删除回归 + reminder）');
+  // ---- 精度：提前唤醒（when）+ 精确等待（毫秒级）+ 按计划网格锚定 ----
+  // 恢复支持一次性闹钟的桩（前面的降级回归测试把它换成了拒绝 when/delayInMinutes）
+  chromeStub.alarms.create = async (name, info) => { lastAlarmCreate = { name, info }; alarmCreates.push({ name, info }); };
+  const gridDue = Date.now() + 400;   // 目标时刻：400ms 后（落在 MAX_WAIT 窗口内 → 走精确等待）
+  store.state = { version: 1, groups: [{
+    id: 'gp', name: '精度组', enabled: true, start: '00:00', end: '00:00',
+    alarms: [{ id: 'ap', name: '精度', text: '', intervalMinutes: 30, startTime: null,
+      enabled: true, nextFire: gridDue, snoozedUntil: null }]
+  }] };
+  store.pendingReminders = { batches: {} };
+  // 配置变更触发重新排程：排程方式每轮从最优方式重新探测（浏览器升级/桩恢复后可自愈回 when）
+  listeners.storageChanged.forEach(fn => fn({ state: { newValue: store.state } }, 'local'));
+  await sleep(100);
+  assert.strictEqual(store.scheduleInfo.mode, 'when', '排程方式重新探测回 when（自愈）');
+  for (const fn of listeners.alarm) fn({ name: 'clock-tick' });
+  await sleep(900);
+  const ap = store.state.groups[0].alarms[0];
+  const pBatch = Object.values(store.pendingReminders.batches)[0];
+  assert.ok(pBatch, '目标进入等待窗口后精确等到点并触发（生成批次）');
+  const pDelta = pBatch.firedAt - gridDue;
+  assert.ok(pDelta >= 0 && pDelta < 150, '触发时刻与计划时刻误差 < 150ms（实际 +' + pDelta + 'ms）');
+  assert.strictEqual(ap.nextFire, gridDue + 30 * 60000, '触发后锚点落在计划网格（due + 间隔）');
+  const pCreate = lastCreate('clock-tick');
+  assert.ok(pCreate && pCreate.info && pCreate.info.when != null, '支持一次性闹钟时用 when 排程');
+  assert.ok(Math.abs(pCreate.info.when - (ap.nextFire - 20000)) < 2000, '唤醒点 = 目标 − 20 秒（预唤醒）');
+
+  // 迟到触发不再固化错位：计划 10:00、实际晚 37 秒 → 锚点仍是网格点（due + 间隔）
+  const lateDue = Date.now() - 37000;
+  ap.nextFire = lateDue;
+  for (const fn of listeners.alarm) fn({ name: 'clock-tick' });
+  await sleep(300);
+  assert.strictEqual(ap.nextFire, lateDue + 30 * 60000, '晚 37 秒触发后锚点仍在计划网格（不再固化错位）');
+  assert.ok(store.fireStats && Math.abs(store.fireStats.last - 37000) < 600,
+    '诊断记录触发偏差 ≈ 37 秒（实际 ' + (store.fireStats && store.fireStats.last) + 'ms）');
+  // 兜底闹钟：未到期时为空操作（不会重复触发同一条提醒）
+  const batchesBefore = Object.keys(store.pendingReminders.batches).length;
+  for (const fn of listeners.alarm) fn({ name: 'clock-backup' });
+  await sleep(200);
+  assert.strictEqual(Object.keys(store.pendingReminders.batches).length, batchesBefore,
+    '兜底闹钟在未到期时为空操作（不重复提醒）');
+
+  const diagEl = registry['diagLine'];
+  assert.ok(diagEl && /排程方式：/.test(String(diagEl.textContent)), '选项页运行诊断显示排程方式');
+
+  console.log('✔ 页面/Service Worker 冒烟测试通过（安装 + tick + popup + options 删除回归 + reminder + 精度）');
 })().catch(err => { console.error('✘ 冒烟测试失败：', err); process.exit(1); });
