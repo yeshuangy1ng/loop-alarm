@@ -102,10 +102,10 @@
     return pad2(d.getHours()) + ':' + pad2(d.getMinutes());
   }
 
-  /** 短倒计时（角标用，尽量 <= 4 字符） */
+  /** 短倒计时（角标用，尽量 <= 4 字符；统一分钟级：实际触发精度只有约 1 分钟，秒级显示会误导） */
   function formatCountdown(ms) {
     const s = Math.max(0, Math.round(ms / 1000));
-    if (s < 60) return s + 's';
+    if (s < 60) return '<1m';
     if (s < 3600) return Math.floor(s / 60) + 'm';
     const h = Math.floor(s / 3600);
     if (h < 24) return h + 'h';

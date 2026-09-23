@@ -95,7 +95,10 @@ assert.strictEqual(a6.nextFire, D('2024-01-01T11:30:00'));
 
 // ---------- 格式化 ----------
 assert.strictEqual(L.formatHHMM(D('2024-01-01T09:05:00')), '09:05');
-assert.strictEqual(L.formatCountdown(45000), '45s');
+assert.strictEqual(L.formatCountdown(0), '<1m');
+assert.strictEqual(L.formatCountdown(45000), '<1m'); // 秒级不再显示，统一分钟级
+assert.strictEqual(L.formatCountdown(60000), '1m');
+assert.strictEqual(L.formatCountdown(59 * 60000), '59m');
 assert.strictEqual(L.formatCountdown(900000), '15m');
 assert.strictEqual(L.formatCountdown(3 * 3600000 + 30 * 60000), '3h');
 assert.strictEqual(L.formatCountdown(2 * 24 * 3600000), '2d');
@@ -103,4 +106,4 @@ assert.strictEqual(L.intervalToLabel(90), '1 小时 30 分钟');
 assert.strictEqual(L.intervalToLabel(30), '30 分钟');
 assert.strictEqual(L.intervalToLabel(120), '2 小时');
 
-console.log('✔ 核心调度逻辑测试全部通过（' + 48 + ' 项断言）');
+console.log('✔ 核心调度逻辑测试全部通过（' + 52 + ' 项断言）');
