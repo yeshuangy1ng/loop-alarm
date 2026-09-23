@@ -1,7 +1,8 @@
 /*
  * 循环闹钟 — 提醒卡片页
  * 由后台在到点时打开（?batch=<batchId>），展示本批次到期的闹钟。
- * 每条可「稍后提醒」（5/10/30 分钟，循环将从稍后时刻重新起算）；「关闭」结束本卡片。
+ * 每条可「稍后提醒」（5/10/30 分钟，循环将从稍后时刻重新起算），点击后该条目立即移除；
+ * 所有条目处理完 → 自动关闭本页（无法脚本关闭时显示关闭提示）；「关闭」按钮 / Esc 随时可关闭。
  */
 const PENDING_KEY = 'pendingReminders';
 const params = new URLSearchParams(location.search);
@@ -64,6 +65,7 @@ async function snooze(alarmId, min) {
   if (!batch.items.length) delete store.batches[batchId];
   await chrome.storage.local.set(out); // 后台监听状态变化后自动重新排程
   render();
+  if (!items.length) tryClose(); // 全部条目已处理 → 自动关闭本页
 }
 
 function tryClose() {

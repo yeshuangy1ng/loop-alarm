@@ -2,7 +2,8 @@
  * 循环闹钟 — 页面内提醒卡片（内容脚本）
  * 显示在当前页面右上角（position: fixed，高 z-index，全内联样式，避免受页面 CSS 影响）。
  * 后台通过 chrome.tabs.sendMessage 发送 { type: 'showReminder', batch }：
- *   - 每条提醒有「稍后 5 / 10 / 30 分钟」按钮 → 向后台发 snooze 消息
+ *   - 每条提醒有「稍后 5 / 10 / 30 分钟」按钮 → 向后台发 snooze 消息，
+ *     该条目随即收起；所有条目都处理后卡片自动关闭
  *   - 顶部「✕ 关闭」→ 向后台发 dismiss 消息（删除该批次）
  * 新提醒到达时先关闭旧卡片并清理旧批次。
  */
@@ -85,6 +86,25 @@
     node.appendChild(head);
 
     // 提醒条目
+    const itemBoxes = [];
+    // 稍后提醒后收起该条目；所有条目都处理完 → 整卡自动关闭
+    // （后台已把该条目从批次中移除，批次清空时后台自动删除批次）
+    function removeItem(box) {
+      box.style.transition = 'opacity .2s';
+      box.style.opacity = '0';
+      setTimeout(() => {
+        box.remove();
+        const i = itemBoxes.indexOf(box);
+        if (i >= 0) itemBoxes.splice(i, 1);
+        if (itemBoxes.length === 0 && card === node) {
+          node.remove();
+          card = null;
+          currentBatchId = null;
+          console.info('[循环闹钟] 提醒已全部处理，卡片自动关闭');
+        }
+      }, 200);
+    }
+
     for (const it of batch.items) {
       const box = makeEl('div', { padding: '10px 12px', borderTop: '1px solid #f1f3f5' });
       box.appendChild(makeEl('div', { fontWeight: '600', fontSize: '13px', marginBottom: '2px' },
@@ -117,11 +137,13 @@
           b.textContent = min + ' 分钟 ✓';
           chrome.runtime.sendMessage({ type: 'snooze', batchId: batch.batchId, alarmId: it.alarmId, minutes: min })
             .catch(() => { });
+          removeItem(box);
         });
         row.appendChild(b);
       }
       box.appendChild(row);
       node.appendChild(box);
+      itemBoxes.push(box);
     }
 
     card = node;

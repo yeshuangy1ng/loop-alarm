@@ -196,6 +196,8 @@ async function runScript(file) {
   // ---- content.js：页面内提醒卡片渲染 + 稍后提醒 / 关闭消息 ----
   await runScript('content.js');
   const contentListener = onMsgAll[onMsgAll.length - 1];
+
+  // (a) 单条目批次：点「稍后提醒」→ 发 snooze 消息，卡片自动关闭
   contentListener({ type: 'showReminder', batch: store.pendingReminders.batches.b1 }, {}, () => {});
   await sleep(50);
   const cardEl = doc.body.children[doc.body.children.length - 1];
@@ -204,12 +206,46 @@ async function runScript(file) {
   const boxEl = cardEl.children[cardEl.children.length - 1];
   const btnRowEl = boxEl.children[boxEl.children.length - 1];
   btnRowEl.children[0]._listeners.click.forEach(fn => fn({})); // 稍后 5 分钟
-  headEl.children[headEl.children.length - 1]._listeners.click.forEach(fn => fn({})); // 关闭
-  await sleep(50);
+  await sleep(300); // 等待 200ms 淡出
   assert.ok(sentRuntimeMessages.some(m => m.type === 'snooze' && m.alarmId === 'a1' && m.minutes === 5),
     '页面内卡片「稍后提醒 5 分钟」向后台发消息');
-  assert.ok(sentRuntimeMessages.some(m => m.type === 'dismiss' && m.batchId === 'b1'),
+  assert.ok(!doc.body.children.includes(cardEl), '点击「稍后提醒」后卡片自动关闭');
+
+  // (b) 「✕ 关闭」按钮 → 发 dismiss 消息并移除卡片
+  store.pendingReminders.batches.b2 = { batchId: 'b2', firedAt: now, items: [{
+    groupId: 'g1', groupName: '测试组', alarmId: 'a1', alarmName: '站立活动', text: '', firedAt: now
+  }] };
+  contentListener({ type: 'showReminder', batch: store.pendingReminders.batches.b2 }, {}, () => {});
+  await sleep(50);
+  const cardEl2 = doc.body.children[doc.body.children.length - 1];
+  const closeBtnEl = cardEl2.children[0].children[cardEl2.children[0].children.length - 1];
+  closeBtnEl._listeners.click.forEach(fn => fn({})); // 关闭
+  await sleep(50);
+  assert.ok(sentRuntimeMessages.some(m => m.type === 'dismiss' && m.batchId === 'b2'),
     '页面内卡片「关闭」向后台发消息');
+  assert.ok(!doc.body.children.includes(cardEl2), '点击「关闭」后卡片移除');
+
+  // (c) 多条目批次：稍后提醒某条 → 该条目收起、卡片保留；全部处理 → 卡片自动关闭
+  store.pendingReminders.batches.b3 = { batchId: 'b3', firedAt: now, items: [
+    { groupId: 'g1', groupName: '测试组', alarmId: 'a1', alarmName: '站立活动', text: '', firedAt: now },
+    { groupId: 'g1', groupName: '测试组', alarmId: 'a2', alarmName: '喝水', text: '', firedAt: now }
+  ] };
+  contentListener({ type: 'showReminder', batch: store.pendingReminders.batches.b3 }, {}, () => {});
+  await sleep(50);
+  const cardEl3 = doc.body.children[doc.body.children.length - 1];
+  const boxA = cardEl3.children[1];
+  const boxB = cardEl3.children[2];
+  const rowA = boxA.children[boxA.children.length - 1];
+  rowA.children[0]._listeners.click.forEach(fn => fn({})); // 条目 A 稍后 5 分钟
+  await sleep(300);
+  assert.ok(doc.body.children.includes(cardEl3), '多条目：稍后提醒一条后卡片保留');
+  assert.ok(!cardEl3.children.includes(boxA), '稍后提醒的条目收起');
+  const rowB = boxB.children[boxB.children.length - 1];
+  rowB.children[0]._listeners.click.forEach(fn => fn({})); // 条目 B 稍后 5 分钟
+  await sleep(300);
+  assert.ok(!doc.body.children.includes(cardEl3), '全部条目稍后提醒后卡片自动关闭');
+  assert.ok(sentRuntimeMessages.filter(m => m.type === 'snooze' && m.alarmId === 'a2' && m.minutes === 5).length >= 1,
+    '多批次条目的「稍后提醒」逐条向后台发消息');
 
   // ---- background onMessage：稍后提醒写 snoozedUntil 并删除批次；关闭删除批次 ----
   const bgListener = onMsgAll[0];
@@ -296,6 +332,18 @@ async function runScript(file) {
 
   // ---- 提醒卡片页 ----
   await runScript('reminder.js');
+
+  // ---- 提醒卡片页：「稍后提醒」移除条目，全部处理后自动关闭 ----
+  const itemsEl = registry['items'];
+  const reminderBtn = itemsEl.querySelectorAll('button[data-min]')[0];
+  assert.ok(reminderBtn._listeners.click && reminderBtn._listeners.click.length, '提醒卡片页「稍后提醒」按钮已绑定');
+  reminderBtn.closest = () => makeEl({ dataset: { aid: 'a1' } }); // 模拟按钮所属条目
+  reminderBtn._listeners.click.forEach(fn => fn({}));
+  await sleep(150);
+  assert.strictEqual(store.pendingReminders.batches.b1, undefined, '提醒卡片页「稍后提醒」后批次清空即删除');
+  await sleep(400); // tryClose：300ms 后显示关闭提示（测试环境 window.close 不可用）
+  const hintEl = registry['closeHint'];
+  assert.strictEqual(hintEl.style.display, 'inline', '全部条目处理后显示自动关闭提示');
 
   console.log('✔ 页面/Service Worker 冒烟测试通过（安装 + tick + popup + options 删除回归 + reminder）');
 })().catch(err => { console.error('✘ 冒烟测试失败：', err); process.exit(1); });
