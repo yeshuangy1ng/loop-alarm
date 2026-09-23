@@ -330,6 +330,50 @@ async function runScript(file) {
   assert.strictEqual(store.state.groups.length, groupCountBefore, '无效文件不修改配置');
   assert.ok(alerts.some(m => /导入失败/.test(String(m))), '无效文件触发错误提示');
 
+  // ---- options 页：配置变更重新锚定 + 外部变更刷新（内容判断）----
+  const g1 = { id: 'g1', name: '测试组', enabled: true, start: '00:00', end: '00:00',
+    alarms: [{ id: 'a1', name: '站立活动', text: '', intervalMinutes: 30,
+      startTime: now - 3600000, enabled: true,
+      nextFire: now + 600000, snoozedUntil: now + 600000 }] };
+  store.state = { version: 1, groups: [g1] };
+  // 模拟后台外部写入（如提醒触发后推进 nextFire）。
+  // 该事件落在上一次自写（导入 persist）的 800ms 内：旧的定时判断会误判为自写丢弃，
+  // 导致页面内存状态过期、下一次保存覆盖后台变更；新的内容判断必须正常刷新
+  listeners.storageChanged.forEach(fn => fn({ state: { oldValue: null, newValue: store.state } }, 'local'));
+  await sleep(150);
+  const a1 = g1.alarms[0];
+  const box = docAll['.alarm'][0];
+  const ih = box.querySelector('[data-f="ih"]');
+  const im = box.querySelector('[data-f="im"]');
+  const startInp = box.querySelector('[data-f="start"]');
+  assert.ok(ih._listeners.change && ih._listeners.change.length, '间隔输入已绑定 change 监听');
+
+  // (1) 改间隔（开始时间已过、循环进行中）→ 从当前时刻重新锚定，变更立即生效
+  ih.value = '2'; im.value = '0';
+  ih._listeners.change.forEach(fn => fn({ target: ih }));
+  await sleep(150);
+  assert.strictEqual(a1.intervalMinutes, 120, '间隔变更已写入');
+  assert.ok(Math.abs(a1.nextFire - (Date.now() + 120 * 60000)) < 90000, '改间隔后锚点重锚定到当前时刻 + 新间隔');
+
+  // (2) 存在挂起的「稍后提醒」+ 设置开始时间（未来）→ 取消稍后提醒，首次提醒 = 开始时间
+  const future = Date.now() + 2 * 3600000;
+  const fd = new Date(future);
+  const pad2 = n => (n < 10 ? '0' : '') + n;
+  startInp.value = fd.getFullYear() + '-' + pad2(fd.getMonth() + 1) + '-' + pad2(fd.getDate())
+    + 'T' + pad2(fd.getHours()) + ':' + pad2(fd.getMinutes());
+  startInp._listeners.change.forEach(fn => fn({ target: startInp }));
+  await sleep(150);
+  assert.strictEqual(a1.snoozedUntil, null, '设置开始时间取消挂起的「稍后提醒」');
+  assert.ok(Math.abs(a1.startTime - future) < 61000, '开始时间已写入');
+  assert.strictEqual(a1.nextFire, a1.startTime, '首次提醒时间 = 开始时间');
+
+  // (3) 再次改间隔（开始时间在未来）→ 首次提醒仍是开始时间
+  ih.value = '3'; im.value = '30';
+  ih._listeners.change.forEach(fn => fn({ target: ih }));
+  await sleep(150);
+  assert.strictEqual(a1.intervalMinutes, 210, '第二次间隔变更已写入');
+  assert.strictEqual(a1.nextFire, a1.startTime, '开始时间在未来：首次提醒仍是开始时间');
+
   // ---- 提醒卡片页 ----
   await runScript('reminder.js');
 

@@ -3,13 +3,14 @@
  * 保存策略：修改即保存（chrome.storage.local）。
  *   - 文本框（名称/文案）：input 事件静默保存，不重渲染，避免丢焦点
  *   - 开关/时间/数值：change 事件保存后重渲染刷新“下次提醒”
- * 外部页面（popup）修改状态时自动刷新本页面（800ms 内自己的写入不触发）。
+ * 外部页面（popup）/ 后台（触发推进、稍后提醒）修改状态时按内容比对自动刷新本页面
+ * （写入内容与自己上一次保存一致才视为自写，避免时间窗误判丢弃真实外部变更）。
  */
 const L = globalThis.AlarmClock;
 const params = new URLSearchParams(location.search);
 let state = { groups: [] };
 let selectedId = null;
-let lastSaveAt = 0;
+let lastWrittenJson = null;
 
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -22,7 +23,7 @@ async function load() {
 }
 
 async function persist() {
-  lastSaveAt = Date.now();
+  lastWrittenJson = JSON.stringify(state);
   await chrome.storage.local.set({ state });
 }
 
@@ -56,10 +57,19 @@ function renderSidebar() {
 
 function nextLine(a, g) {
   if (g.enabled === false || a.enabled === false) return '已停用';
-  const t = L.nextFireTime(a, g, Date.now());
+  const now = Date.now();
+  const t = L.nextFireTime(a, g, now);
   if (t == null) return '—';
   let s = '下次提醒：' + L.formatDateTime(t);
-  if (a.snoozedUntil != null) s += '（稍后提醒至 ' + L.formatDateTime(a.snoozedUntil) + '）';
+  if (a.snoozedUntil != null) {
+    s += '（稍后提醒至 ' + L.formatDateTime(a.snoozedUntil) + '）';
+  } else {
+    const due = L.dueTime(a);
+    const win = { start: g.start, end: g.end };
+    if (due > now && !L.inWindow(due, win)) {
+      s += '（时刻在生效时间段外，将按间隔步进到段内再提醒）';
+    }
+  }
   return s;
 }
 
@@ -183,8 +193,14 @@ function bindMain(g) {
     const applyInterval = async () => {
       const total = (parseInt(ih.value, 10) || 0) * 60 + (parseInt(im.value, 10) || 0);
       if (total < 1) { alert('间隔至少要 1 分钟（小时和分钟不能同时为 0）'); return; }
+      const now = Date.now();
       alarm.intervalMinutes = total;
-      if (!alarm.startTime) alarm.nextFire = Date.now() + total * 60000; // 未设开始时间：重新立即起算
+      // 改间隔立即重新锚定，保证变更马上生效：
+      // - 开始时间在未来 → 首次提醒仍是该开始时间（之后的循环用新间隔）
+      // - 未设开始时间 / 开始时间已过（循环已在进行）→ 从当前时刻按新间隔重新起算
+      //   （不重锚定的话下次提醒仍按旧锚点，用户会看到旧节奏继续，感觉“改间隔没生效”）
+      if (alarm.startTime != null && alarm.startTime > now) alarm.nextFire = alarm.startTime;
+      else alarm.nextFire = now + total * 60000;
       await persist();
       renderMain();
     };
@@ -194,6 +210,10 @@ function bindMain(g) {
     box.querySelector('[data-f="start"]').addEventListener('change', e => {
       const v = e.target.value;
       const now = Date.now();
+      // 显式设置/清空开始时间：取消挂起的「稍后提醒」。
+      // 到期时间以稍后提醒优先，若不清除，新开始时间会被稍后时刻遮蔽，
+      // 稍后触发后锚点 = 稍后时刻 + 间隔，新开始时间永远不会被用到（“设了开始时间不生效”）
+      alarm.snoozedUntil = null;
       if (!v) {
         alarm.startTime = null;
         alarm.nextFire = now + alarm.intervalMinutes * 60000;
@@ -208,6 +228,7 @@ function bindMain(g) {
     box.querySelector('[data-act="clearstart"]').addEventListener('click', e => {
       e.preventDefault();
       alarm.startTime = null;
+      alarm.snoozedUntil = null;
       alarm.nextFire = Date.now() + alarm.intervalMinutes * 60000;
       persist(); renderMain();
     });
@@ -221,14 +242,31 @@ function bindMain(g) {
   });
 }
 
+// 外部变更（后台触发后推进 nextFire、其他页面稍后提醒等）→ 刷新本页面。
+// “自己的写入”按内容判断而非 800ms 时间窗：
+// 旧的定时判断会把恰好落在 800ms 内的后台变更误当自写丢弃，
+// 导致本页面内存状态过期，下一次保存时整体覆盖后台的变更（定时器被设回旧值）。
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !changes.state) return;
-  if (Date.now() - lastSaveAt < 800) return; // 自己触发的写入，跳过
+  const nv = changes.state.newValue;
+  if (nv && lastWrittenJson && JSON.stringify(nv) === lastWrittenJson) return; // 自己触发的写入
+  refreshFromExternal();
+});
+
+function refreshFromExternal() {
+  const ae = typeof document !== 'undefined' ? document.activeElement : null;
+  const typing = ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')
+    && ae.type !== 'checkbox' && ae.type !== 'radio';
+  if (typing) {
+    // 正在输入文本（名称/文案逐字保存）时，等失焦再刷新，避免重建 DOM 打断输入
+    ae.addEventListener('blur', () => refreshFromExternal(), { once: true });
+    return;
+  }
   load().then(() => {
     if (!selGroup()) selectedId = (state.groups[0] || {}).id || null;
     renderSidebar(); renderMain();
   });
-});
+}
 
 // 新建分组（侧边栏按钮与 ?new=1 深链接共用）
 function createGroup() {

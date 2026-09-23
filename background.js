@@ -1,7 +1,8 @@
 /*
  * 循环闹钟 — 后台 Service Worker
  * 职责：
- *  - 排程到点唤醒：优先 chrome.alarms 一次性闹钟（delayInMinutes，精度 30 秒）；
+ *  - 排程到点唤醒：优先 chrome.alarms 一次性闹钟（delayInMinutes，精度 30 秒，
+ *    延迟封顶 59.5 分钟、到期自动链式重排；配置变更时串行化重排）；
  *    部分 Chromium 内核浏览器不支持 time/delayInMinutes 属性（报 Unexpected property），
  *    此时自动降级为 periodInMinutes: 1 每分钟轮询（提醒最多延迟约 1 分钟）。
  *  - 到点触发：补提醒（错过补一次）、打开提醒卡片、推进循环、重新排程
@@ -57,33 +58,46 @@ async function updateBadge() {
   } catch (e) { /* 特殊场景（如浏览器关闭中）忽略 */ }
 }
 
+/** 排程串行化：连续的 config 变更依次执行，防止两次排程交错时
+ *  最后一次 pending 的一次性闹钟对应过期状态（如改配置让下次提醒提前，
+ *  却仍保留更早一次排程排出的更晚闹钟）。 */
+let schedChain = Promise.resolve();
+
 /** 排程下一次到点唤醒（兼容不支持 time/delayInMinutes 的浏览器） */
-async function scheduleTick() {
-  const state = await loadState();
-  const now = Date.now();
-  const t = nextOverall(state, now);
-  if (t == null) {
-    try { await chrome.alarms.clear(TICK_ALARM); }
-    catch (e) { console.warn('[循环闹钟] 清除闹钟失败', e); }
-    return;
-  }
-  if (tickMode === 'one-shot') {
-    try {
-      // 一次性闹钟；Chrome 会将其钳制到最小 30 秒
-      await chrome.alarms.create(TICK_ALARM, { delayInMinutes: Math.max(0.5, (t - now) / 60000) });
-      console.info('[循环闹钟] 排程：' + L.formatDateTime(t) + '（' + tickMode + '）');
+function scheduleTick() {
+  const run = async () => {
+    const state = await loadState();
+    const now = Date.now();
+    const t = nextOverall(state, now);
+    if (t == null) {
+      try { await chrome.alarms.clear(TICK_ALARM); }
+      catch (e) { console.warn('[循环闹钟] 清除闹钟失败', e); }
       return;
-    } catch (e) {
-      tickMode = 'poll';
-      console.warn('[循环闹钟] 浏览器不支持 delayInMinutes，降级为每分钟轮询', e);
     }
-  }
-  try {
-    await chrome.alarms.create(TICK_ALARM, { periodInMinutes: 1 });
-    console.info('[循环闹钟] 排程：每分钟轮询，最近提醒 ' + L.formatDateTime(t));
-  } catch (e) {
-    console.error('[循环闹钟] chrome.alarms 不可用，无法排程提醒', e);
-  }
+    if (tickMode === 'one-shot') {
+      try {
+        // 一次性闹钟；延迟封顶 59.5 分钟：
+        // 极长 delay（如开始时间设在数天后）可能被部分浏览器拒绝或钳制，
+        // 封顶后到期唤醒时 handleTick 会按最新配置重新排程（链式一次性闹钟），
+        // 期间任何配置变更也会经 storage.onChanged 触发重新排程
+        const delayMin = Math.min(59.5, Math.max(0.5, (t - now) / 60000));
+        await chrome.alarms.create(TICK_ALARM, { delayInMinutes: delayMin });
+        console.info('[循环闹钟] 排程：' + L.formatDateTime(t) + '（' + tickMode + '，延迟封顶 59.5 分钟）');
+        return;
+      } catch (e) {
+        tickMode = 'poll';
+        console.warn('[循环闹钟] 浏览器不支持 delayInMinutes，降级为每分钟轮询', e);
+      }
+    }
+    try {
+      await chrome.alarms.create(TICK_ALARM, { periodInMinutes: 1 });
+      console.info('[循环闹钟] 排程：每分钟轮询，最近提醒 ' + L.formatDateTime(t));
+    } catch (e) {
+      console.error('[循环闹钟] chrome.alarms 不可用，无法排程提醒', e);
+    }
+  };
+  schedChain = schedChain.then(run, run);
+  return schedChain;
 }
 
 /** 到点处理：触发所有到期闹钟，打开提醒卡片，推进循环并重新排程 */
